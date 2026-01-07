@@ -4,8 +4,23 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bigdecimal = "0.4.5"
+chrono = { version = "0.4.38", features = ["serde"] }
 ciborium = "0.2.2"
-serde = "1.0.228"
-sha256 = "1.6.0"
-uint = { version = "0.10.0", features = ["serde"] }
-uuid = { version = "1.19.0", features = ["v4", "serde"] }
+ecdsa = { version = "0.16.9", features = [
+    "signing",
+    "verifying",
+    "serde",
+    "pem",
+] }
+flume = "0.11.0"
+hex = "0.4.3"
+k256 = { version = "0.13.3", features = ["serde", "pem"] }
+rand = "0.8.5"
+serde = { version = "1.0.198", features = ["derive"] }
+sha256 = "1.5.0"
+spki = { version = "0.7.3", features = ["pem"] }
+thiserror = "1.0.61"
+tokio = { version = "1.38.0", features = ["full"] }
+uint = "0.9.5"
+uuid = { version = "1.8.0", features = ["v4", "serde"] }

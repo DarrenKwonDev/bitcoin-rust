@@ -1,10 +1,10 @@
 use std::fmt;
 
 use crate::U256;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha256::digest;
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct Hash(U256);
 
 impl Hash {
