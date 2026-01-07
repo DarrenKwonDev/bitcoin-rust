@@ -1,3 +1,4 @@
+use crate::error::{BtcError, Result};
 use crate::sha256::Hash;
 use crate::util::MerkleRoot;
 use crate::{
@@ -19,8 +20,43 @@ impl Blockchain {
             blocks: vec![],
         }
     }
-    pub fn add_block(&mut self, block: Block) {
+    pub fn add_block(&mut self, block: Block) -> Result<()> {
+        // 체인에 블록이 하나도 없다면
+        if self.blocks.is_empty() {
+            // 제네시스 블록의 prev는 zero hash여야만 한다
+            if block.header.prev_block_hash != Hash::zero() {
+                println!("zero hash");
+                return Err(BtcError::InvalidBlock);
+            }
+        } else {
+            // 새 블록의 prev block hash는 이전 블록 해시와 일치해야 한다
+            let last_block = self.blocks.last().unwrap();
+            if block.header.prev_block_hash != last_block.hash() {
+                println!("prev hash is wrong");
+                return Err(BtcError::InvalidBlock);
+            }
+
+            // 현재 채굴된 block은 지정딘 target보다는 커야 한다
+            if !block.header.hash().matches_target(block.header.target) {
+                println!("does not match target");
+                return Err(BtcError::InvalidBlock);
+            }
+
+            // merkel root가 바르게 계산되었는지 체크한다 (tx 변조, 추가, 누락 여부 확인)
+            let calculated_merkle_root = MerkleRoot::calculate(&block.transactions);
+            if calculated_merkle_root != block.header.merkle_root {
+                println!("invalid merkle root");
+                return Err(BtcError::InvalidMerkleRoot);
+            }
+
+            // 채굴된 시간이 마지막 블록 채굴된 시간 이후여야 한다
+            if block.header.timestamp <= last_block.header.timestamp {
+                return Err(BtcError::InvalidBlock);
+            }
+        }
+
         self.blocks.push(block);
+        Ok(())
     }
 }
 
