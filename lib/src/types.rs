@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::error::{BtcError, Result};
 use crate::sha256::Hash;
 use crate::util::MerkleRoot;
@@ -11,15 +13,22 @@ use uuid::Uuid;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Blockchain {
+    pub utxos: HashMap<Hash, TransactionOutput>,
     pub blocks: Vec<Block>,
 }
 
 impl Blockchain {
     pub fn new() -> Self {
         Blockchain {
+            utxos: HashMap::new(),
             blocks: vec![],
         }
     }
+
+    pub fn block_height(&self) -> u64 {
+        self.blocks.len() as u64
+    }
+
     pub fn add_block(&mut self, block: Block) -> Result<()> {
         // 체인에 블록이 하나도 없다면
         if self.blocks.is_empty() {
@@ -53,10 +62,27 @@ impl Blockchain {
             if block.header.timestamp <= last_block.header.timestamp {
                 return Err(BtcError::InvalidBlock);
             }
+
+            // 각 block이 포함한 tx를 다양한 형태로 검증한다.
+            block.verify_transactions(self.block_height(), &self.utxos)?;
         }
 
         self.blocks.push(block);
         Ok(())
+    }
+
+    // quite inefficient, but for simplicitiy.
+    pub fn rebuild_utxos(&mut self) {
+        for block in &self.blocks {
+            for transaction in &block.transactions {
+                for input in &transaction.inputs {
+                    self.utxos.remove(&input.prev_transaction_output_hash);
+                }
+                for output in transaction.outputs.iter() {
+                    self.utxos.insert(transaction.hash(), output.clone());
+                }
+            }
+        }
     }
 }
 
@@ -77,6 +103,124 @@ impl Block {
 
     pub fn hash(&self) -> Hash {
         Hash::hash(self)
+    }
+
+    pub fn calculate_miner_fees(&self, utxos: &HashMap<Hash, TransactionOutput>) -> Result<u64> {
+        let mut inputs: HashMap<Hash, TransactionOutput> = HashMap::new();
+        let mut outputs: HashMap<Hash, TransactionOutput> = HashMap::new();
+
+        for transaction in self.transactions.iter().skip(1) {
+            // input
+            for input in &transaction.inputs {
+                let prev_output = utxos.get(&input.prev_transaction_output_hash);
+                if prev_output.is_none() {
+                    return Err(BtcError::InvalidTransaction);
+                }
+                let prev_output = prev_output.unwrap();
+                if inputs.contains_key(&input.prev_transaction_output_hash) {
+                    return Err(BtcError::InvalidTransaction);
+                }
+                inputs.insert(input.prev_transaction_output_hash, prev_output.clone());
+            }
+
+            // output
+            for output in &transaction.outputs {
+                if outputs.contains_key(&output.hash()) {
+                    return Err(BtcError::InvalidTransaction);
+                }
+                outputs.insert(output.hash(), output.clone());
+            }
+        }
+
+        let input_value: u64 = inputs.values().map(|output| output.value).sum();
+        let output_value: u64 = outputs.values().map(|output| output.value).sum();
+        Ok(input_value - output_value)
+    }
+
+    pub fn verify_coinbase_transaction(
+        &self,
+        predicted_block_height: u64,
+        utxos: &HashMap<Hash, TransactionOutput>,
+    ) -> Result<()> {
+        let coinbase_transaction = &self.transactions[0];
+
+        if coinbase_transaction.inputs.len() != 0 {
+            return Err(BtcError::InvalidTransaction);
+        }
+        if coinbase_transaction.outputs.len() == 0 {
+            return Err(BtcError::InvalidTransaction);
+        }
+
+        let miner_fees = self.calculate_miner_fees(utxos)?;
+        let block_reward = crate::INITIAL_REWARD * 10u64.pow(8)
+            / 2u64.pow((predicted_block_height / crate::HALVING_INTERVAL) as u32);
+        let total_coinbase_outputs: u64 =
+            coinbase_transaction.outputs.iter().map(|output| output.value).sum();
+
+        if total_coinbase_outputs != block_reward + miner_fees {
+            return Err(BtcError::InvalidTransaction);
+        }
+
+        Ok(())
+    }
+
+    pub fn verify_transactions(
+        &self,
+        predicted_block_height: u64,
+        utxos: &HashMap<Hash, TransactionOutput>,
+    ) -> Result<()> {
+        // 해당 블록 내 소비될 utxo
+        // 같은 블록 내 이중 지출을 막기 위한 로컬 변수
+        let mut inputs: HashMap<Hash, TransactionOutput> = HashMap::new();
+
+        // tx를 하나도 안 들고 있는 블록 처리
+        if self.transactions.is_empty() {
+            return Err(BtcError::InvalidTransaction);
+        }
+
+        self.verify_coinbase_transaction(predicted_block_height, utxos)?;
+
+        // 일반적인 tx 검증. except coinbase (first tx)
+        for transaction in self.transactions.iter().skip(1) {
+            let mut input_value = 0;
+            let mut output_value = 0;
+
+            // 해당 블록의 input tx 들을 검증한다.
+            for input in &transaction.inputs {
+                // input 해시가 참조하는 이전 tx
+                let prev_output = utxos.get(&input.prev_transaction_output_hash);
+                if prev_output.is_none() {
+                    return Err(BtcError::InvalidTransaction);
+                }
+                let prev_output = prev_output.unwrap();
+
+                // double-spending 방지
+                // 로컬 변수인 inputs 상에 누적된 input들 중 이전 tx 중 사용된 것이 하나라도 있으면 그것은 이중 지출이므로 걸러낸다.
+                if inputs.contains_key(&input.prev_transaction_output_hash) {
+                    return Err(BtcError::InvalidTransaction);
+                }
+
+                // input으로 사용될 tx의 이전 output이 올바른 소유자에 의해 서명된 것인지 확인
+                if !input.signature.verify(&input.prev_transaction_output_hash, &prev_output.pubkey)
+                {
+                    return Err(BtcError::InvalidSignature);
+                }
+                input_value += prev_output.value;
+                inputs.insert(input.prev_transaction_output_hash, prev_output.clone());
+            }
+
+            // 도출된 output의 값어치
+            for output in &transaction.outputs {
+                output_value += output.value;
+            }
+
+            // 채굴 보상이 있으므로 output 값어치는 input 값어치보다 항상 적어야 한다.
+            if input_value < output_value {
+                return Err(BtcError::InvalidTransaction);
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -135,6 +279,7 @@ impl Transaction {
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct TransactionInput {
+    /// input으로 사용할 이전 output tx.
     pub prev_transaction_output_hash: Hash,
     pub signature: Signature,
 }
