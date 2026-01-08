@@ -1,14 +1,14 @@
-use std::collections::{HashMap, HashSet};
-
 use crate::error::{BtcError, Result};
 use crate::sha256::Hash;
 use crate::types::block::Block;
 use crate::types::transaction::{Transaction, TransactionOutput};
-use crate::util::MerkleRoot;
+use crate::util::{MerkleRoot, Savable};
 use crate::U256;
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::io::{Error as IoError, ErrorKind as IoErrorKind, Read, Result as IoResult, Write};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Blockchain {
@@ -311,5 +311,18 @@ impl Blockchain {
         // 최소보다는 커야 하므로
         self.target = new_target.min(crate::MIN_TARGET);
         dbg!(self.target);
+    }
+}
+
+impl Savable for Blockchain {
+    fn load<I: Read>(reader: I) -> IoResult<Self> {
+        ciborium::de::from_reader(reader).map_err(|_| {
+            IoError::new(IoErrorKind::InvalidData, "Failed to deseriailize blockchain")
+        })
+    }
+
+    fn save<O: Write>(&self, writer: O) -> IoResult<()> {
+        ciborium::ser::into_writer(self, writer)
+            .map_err(|_| IoError::new(IoErrorKind::InvalidData, "Failed to serialize blockchain"))
     }
 }
