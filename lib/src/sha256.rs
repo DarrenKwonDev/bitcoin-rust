@@ -28,6 +28,7 @@ impl Hash {
     }
     // check if a hash matches a target
     // hash가 target 이하라면 채굴한 것으로 간주
+    // 본래는 leading zero를 만족하는 해시를 찾아내야 하는데, 여기서는 단순 값 비교로 간이처리
     pub fn matches_target(&self, target: U256) -> bool {
         self.0 <= target
     }
