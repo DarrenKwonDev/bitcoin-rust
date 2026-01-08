@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::{BtcError, Result};
 use crate::sha256::Hash;
@@ -14,14 +14,19 @@ use uuid::Uuid;
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Blockchain {
     pub utxos: HashMap<Hash, TransactionOutput>,
+    pub target: U256,
     pub blocks: Vec<Block>,
+    #[serde(default, skip_serializing)]
+    mempool: Vec<(DateTime<Utc>, Transaction)>,
 }
 
 impl Blockchain {
     pub fn new() -> Self {
         Blockchain {
             utxos: HashMap::new(),
+            target: crate::MIN_TARGET,
             blocks: vec![],
+            mempool: vec![],
         }
     }
 
@@ -40,12 +45,14 @@ impl Blockchain {
         } else {
             // 새 블록의 prev block hash는 이전 블록 해시와 일치해야 한다
             let last_block = self.blocks.last().unwrap();
+
+            // 블록체인 상 마지막 블록의 해시는 현재 채굴된 블록의 prev_block_hash와 동일해야 한다
             if block.header.prev_block_hash != last_block.hash() {
                 println!("prev hash is wrong");
                 return Err(BtcError::InvalidBlock);
             }
 
-            // 현재 채굴된 block은 지정딘 target보다는 커야 한다
+            // 현재 채굴된 block은 지정된 target보다는 커야 한다
             if !block.header.hash().matches_target(block.header.target) {
                 println!("does not match target");
                 return Err(BtcError::InvalidBlock);
@@ -67,7 +74,15 @@ impl Blockchain {
             block.verify_transactions(self.block_height(), &self.utxos)?;
         }
 
+        // 채굴된 블록의 tx를 모아서 mempool에서 지운다 (처리된 것이므로)
+        let block_transactions: HashSet<_> =
+            block.transactions.iter().map(|tx| tx.hash()).collect();
+        self.mempool.retain(|(_, tx)| !block_transactions.contains(&tx.hash()));
+
         self.blocks.push(block);
+
+        self.try_adjust_target();
+
         Ok(())
     }
 
@@ -83,6 +98,46 @@ impl Blockchain {
                 }
             }
         }
+    }
+
+    pub fn try_adjust_target(&mut self) {
+        if self.blocks.is_empty() {
+            return;
+        }
+        if self.blocks.len() % crate::DIFFICULTY_UPDATE_INTERVAL as usize != 0 {
+            return;
+        }
+
+        // 현재보다 50개 이전의 timestamp
+        let start_time = self.blocks
+            [self.blocks.len() - crate::DIFFICULTY_UPDATE_INTERVAL as usize]
+            .header
+            .timestamp;
+        let end_time = self.blocks.last().unwrap().header.timestamp;
+
+        // 50개 블록이 만들어질 때 까지 걸린 시간
+        let time_diff = end_time - start_time;
+        let time_diff_seconds = time_diff.num_seconds();
+
+        // 이전 50개의 블록이 생성된 시간이 IDLE한 blocktime과 얼마나 차이가 났는지?
+        let target_seconds = crate::IDEAL_BLOCK_TIME * crate::DIFFICULTY_UPDATE_INTERVAL;
+
+        // target * (실제 시간 / 기대시간)
+        // 너무 빨리 되었다면 (실제 시간 / 기대시간) < 1 -> target이 더 어려워지게
+        // 너무 느리게 되었다면 (실제 시간 / 기대 시간) > 1 -> target이 더 쉬워지게
+        let new_target = self.target * (time_diff_seconds as f64 / target_seconds as f64) as usize;
+
+        // 현재 난이도의 25%, 400% 내에서만 움직이도록 clamp 처리한다. 너무 급격한 난이도 변경을 방지.
+        let new_target = if new_target < self.target / 4 {
+            self.target / 4
+        } else if new_target > self.target * 4 {
+            self.target * 4
+        } else {
+            new_target
+        };
+
+        // 최소보다는 커야 하므로
+        self.target = new_target.min(crate::MIN_TARGET);
     }
 }
 
@@ -151,9 +206,14 @@ impl Block {
             return Err(BtcError::InvalidTransaction);
         }
 
+        // 사용자들이 낸 수수료
         let miner_fees = self.calculate_miner_fees(utxos)?;
+
+        // 보상 * 사토시 변환 / 반감기에 따른 2승수 나눗셈
         let block_reward = crate::INITIAL_REWARD * 10u64.pow(8)
             / 2u64.pow((predicted_block_height / crate::HALVING_INTERVAL) as u32);
+
+        // coinbase tx의 출력값의 합은 블록 보상과 miner fee의 합과 동일하다.
         let total_coinbase_outputs: u64 =
             coinbase_transaction.outputs.iter().map(|output| output.value).sum();
 
@@ -185,7 +245,7 @@ impl Block {
             let mut input_value = 0;
             let mut output_value = 0;
 
-            // 해당 블록의 input tx 들을 검증한다.
+            // input 검증
             for input in &transaction.inputs {
                 // input 해시가 참조하는 이전 tx
                 let prev_output = utxos.get(&input.prev_transaction_output_hash);
@@ -209,7 +269,7 @@ impl Block {
                 inputs.insert(input.prev_transaction_output_hash, prev_output.clone());
             }
 
-            // 도출된 output의 값어치
+            // output 처리
             for output in &transaction.outputs {
                 output_value += output.value;
             }
