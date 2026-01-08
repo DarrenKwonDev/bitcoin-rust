@@ -14,7 +14,8 @@ use uuid::Uuid;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Blockchain {
-    utxos: HashMap<Hash, TransactionOutput>,
+    // mark(true) 라면 해당 utxo가 현재 mempool의 다른 트랜잭션에서 사용 중인지
+    utxos: HashMap<Hash, (bool, TransactionOutput)>,
     target: U256,
     blocks: Vec<Block>,
     #[serde(default, skip_serializing)]
@@ -32,7 +33,7 @@ impl Blockchain {
     }
 
     // utxos getter
-    pub fn utxos(&self) -> &HashMap<Hash, TransactionOutput> {
+    pub fn utxos(&self) -> &HashMap<Hash, (bool, TransactionOutput)> {
         &self.utxos
     }
     // target getter
@@ -70,12 +71,61 @@ impl Blockchain {
             known_inputs.insert(input.prev_transaction_output_hash);
         }
 
+        // -----------------------------------
+        // RBF (Replace-By-Fee) 로직
+        // 원래라면 실제 비트코인에서는 수수료 비교해서 miner fee가 더 나오는 것을 선택함.
+        // 여기서는 단순하게 나중에 온 것을 우선시하고, 이전에 있던 건 mempool에서 삭제
+
+        // 이 utxo가 이미 mempool의 다른 트랜잭션에서 사용 중이면
+        // 그 트랜잭션을 찾아서 제거하고
+        // 그 트랜잭션이 사용한 모든 utxo의 마킹을 해제
+        for input in &transaction.inputs {
+            // 이미 사용된 output이 utxo에 존재하는 경우, 이중 사용된 output임.
+            if let Some((true, _)) = self.utxos.get(&input.prev_transaction_output_hash) {
+                // 해당 utxo를 사용한, 먼저 mempool에 있던 tx를 찾아냄
+                let referencing_transaction =
+                    self.mempool.iter().enumerate().find(|(_, (_, transaction))| {
+                        transaction
+                            .outputs
+                            .iter()
+                            .any(|output| output.hash() == input.prev_transaction_output_hash)
+                    });
+
+                // 지워야 할 기존 tx가 사용한 input들을 모두 사용 가능한 형태(mark=false) 로 되돌린다.
+                if let Some((idx, (_, referencing_transaction))) = referencing_transaction {
+                    for input in &referencing_transaction.inputs {
+                        self.utxos.entry(input.prev_transaction_output_hash).and_modify(
+                            |(marked, _)| {
+                                *marked = false;
+                            },
+                        );
+                    }
+
+                    // remove the transaction from the mempool
+                    self.mempool.remove(idx);
+                } else {
+                    // 분명 이중 사용된 utxo이었을 텐데, 그걸 사용한 기존 tx를 mempool에서 발견하지 못했다?
+                    // 이상한 케이스가 맞지만 해당 utxo의 mark를 false (아직 사용되지 않음) 으로 바꾼다
+                    self.utxos.entry(input.prev_transaction_output_hash).and_modify(
+                        |(marked, _)| {
+                            *marked = false;
+                        },
+                    );
+                }
+            }
+        }
+
+        // -----------------------------------
         // input이 활용한 이전 block의 output value를 모두 모은다
         let all_inputs = transaction
             .inputs
             .iter()
             .map(|input| {
-                self.utxos.get(&input.prev_transaction_output_hash).expect("BUG: impossible").value
+                self.utxos
+                    .get(&input.prev_transaction_output_hash)
+                    .expect("BUG: impossible")
+                    .1
+                    .value
             })
             .sum::<u64>();
 
@@ -88,7 +138,6 @@ impl Blockchain {
         }
 
         // -----------------------------------
-
         // mempool에 tx를 추가한다
         self.mempool.push((Utc::now(), transaction));
 
@@ -101,6 +150,7 @@ impl Blockchain {
                     self.utxos
                         .get(&input.prev_transaction_output_hash)
                         .expect("BUG: impossible")
+                        .1
                         .value
                 })
                 .sum::<u64>();
@@ -112,6 +162,31 @@ impl Blockchain {
         });
 
         Ok(())
+    }
+
+    pub fn cleanup_mempool(&mut self) {
+        let now = Utc::now();
+        let mut utxo_hashes_to_unmark: Vec<Hash> = vec![];
+
+        // 시간 지났으면 지워야 할 tx가 소비했던 input utxo들을 저장해뒀다가 mark=false로 바꾼다
+        self.mempool.retain(|(timestamp, transaction)| {
+            if now - *timestamp
+                > chrono::Duration::seconds(crate::MAX_MEMPOOL_TRANSACTION_AGE as i64)
+            {
+                utxo_hashes_to_unmark.extend(
+                    transaction.inputs.iter().map(|input| input.prev_transaction_output_hash),
+                );
+                false
+            } else {
+                true
+            }
+        });
+
+        for hash in utxo_hashes_to_unmark {
+            self.utxos.entry(hash).and_modify(|(marked, _)| {
+                *marked = false;
+            });
+        }
     }
 
     pub fn add_block(&mut self, block: Block) -> Result<()> {
@@ -174,7 +249,7 @@ impl Blockchain {
                     self.utxos.remove(&input.prev_transaction_output_hash);
                 }
                 for output in transaction.outputs.iter() {
-                    self.utxos.insert(transaction.hash(), output.clone());
+                    self.utxos.insert(transaction.hash(), (false, output.clone()));
                 }
             }
         }
@@ -260,14 +335,18 @@ impl Block {
         Hash::hash(self)
     }
 
-    pub fn calculate_miner_fees(&self, utxos: &HashMap<Hash, TransactionOutput>) -> Result<u64> {
+    pub fn calculate_miner_fees(
+        &self,
+        utxos: &HashMap<Hash, (bool, TransactionOutput)>,
+    ) -> Result<u64> {
         let mut inputs: HashMap<Hash, TransactionOutput> = HashMap::new();
         let mut outputs: HashMap<Hash, TransactionOutput> = HashMap::new();
 
         for transaction in self.transactions.iter().skip(1) {
             // input
             for input in &transaction.inputs {
-                let prev_output = utxos.get(&input.prev_transaction_output_hash);
+                let prev_output =
+                    utxos.get(&input.prev_transaction_output_hash).map(|(_, output)| output);
                 if prev_output.is_none() {
                     return Err(BtcError::InvalidTransaction);
                 }
@@ -295,7 +374,7 @@ impl Block {
     pub fn verify_coinbase_transaction(
         &self,
         predicted_block_height: u64,
-        utxos: &HashMap<Hash, TransactionOutput>,
+        utxos: &HashMap<Hash, (bool, TransactionOutput)>,
     ) -> Result<()> {
         let coinbase_transaction = &self.transactions[0];
 
@@ -327,7 +406,7 @@ impl Block {
     pub fn verify_transactions(
         &self,
         predicted_block_height: u64,
-        utxos: &HashMap<Hash, TransactionOutput>,
+        utxos: &HashMap<Hash, (bool, TransactionOutput)>,
     ) -> Result<()> {
         // 해당 블록 내 소비될 utxo
         // 같은 블록 내 이중 지출을 막기 위한 로컬 변수
@@ -348,7 +427,8 @@ impl Block {
             // input 검증
             for input in &transaction.inputs {
                 // input 해시가 참조하는 이전 tx
-                let prev_output = utxos.get(&input.prev_transaction_output_hash);
+                let prev_output =
+                    utxos.get(&input.prev_transaction_output_hash).map(|(_, output)| output);
                 if prev_output.is_none() {
                     return Err(BtcError::InvalidTransaction);
                 }

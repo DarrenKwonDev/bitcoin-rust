@@ -32,3 +32,6 @@ pub const MIN_TARGET: U256 = U256([
 
 // 난이도 조정 (실제 bitcoin은 2016 블록마다 조정)
 pub const DIFFICULTY_UPDATE_INTERVAL: u64 = 50;
+
+// 600 블록이 지나도 mempool에서 소비되지 않으면 tx를 버린다
+pub const MAX_MEMPOOL_TRANSACTION_AGE: u64 = 600;
