@@ -14,9 +14,9 @@ use uuid::Uuid;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Blockchain {
-    pub utxos: HashMap<Hash, TransactionOutput>,
-    pub target: U256,
-    pub blocks: Vec<Block>,
+    utxos: HashMap<Hash, TransactionOutput>,
+    target: U256,
+    blocks: Vec<Block>,
     #[serde(default, skip_serializing)]
     mempool: Vec<(DateTime<Utc>, Transaction)>,
 }
@@ -31,8 +31,87 @@ impl Blockchain {
         }
     }
 
+    // utxos getter
+    pub fn utxos(&self) -> &HashMap<Hash, TransactionOutput> {
+        &self.utxos
+    }
+    // target getter
+    pub fn target(&self) -> U256 {
+        self.target
+    }
+    // blocks getter
+    pub fn blocks(&self) -> impl Iterator<Item = &Block> {
+        self.blocks.iter()
+    }
+    // mempool getter
+    pub fn mempool(&self) -> &[(DateTime<Utc>, Transaction)] {
+        &self.mempool
+    }
+
     pub fn block_height(&self) -> u64 {
         self.blocks.len() as u64
+    }
+
+    // 외부에서 전송 받은 tx를 mempool에 추가한다.
+    pub fn add_to_mempool(&mut self, transaction: Transaction) -> Result<()> {
+        let mut known_inputs = HashSet::new();
+
+        for input in &transaction.inputs {
+            // input이 유래한 output이 utxo에 존재해야만 한다.
+            if !self.utxos.contains_key(&input.prev_transaction_output_hash) {
+                return Err(BtcError::InvalidTransaction);
+            }
+            // utxo의 이중 사용은 불가하므로 이미 set에 존재한다면 바른 tx가 아니다.
+            if known_inputs.contains(&input.prev_transaction_output_hash) {
+                return Err(BtcError::InvalidTransaction);
+            }
+
+            // utxo의 소비한 output hash를 inputs에 넣는다.
+            known_inputs.insert(input.prev_transaction_output_hash);
+        }
+
+        // input이 활용한 이전 block의 output value를 모두 모은다
+        let all_inputs = transaction
+            .inputs
+            .iter()
+            .map(|input| {
+                self.utxos.get(&input.prev_transaction_output_hash).expect("BUG: impossible").value
+            })
+            .sum::<u64>();
+
+        // 결과로 생성된 이번 블록의 output value를 더한다.
+        let all_outputs = transaction.outputs.iter().map(|output| output.value).sum::<u64>();
+
+        // 수수료를 생각하면 input이 항상 output보다 커야 한다
+        if all_inputs < all_outputs {
+            return Err(BtcError::InvalidTransaction);
+        }
+
+        // -----------------------------------
+
+        // mempool에 tx를 추가한다
+        self.mempool.push((Utc::now(), transaction));
+
+        // miner fee를 maximize하기 위해서 정렬한다
+        self.mempool.sort_by_key(|(_, transaction)| {
+            let all_inputs = transaction
+                .inputs
+                .iter()
+                .map(|input| {
+                    self.utxos
+                        .get(&input.prev_transaction_output_hash)
+                        .expect("BUG: impossible")
+                        .value
+                })
+                .sum::<u64>();
+
+            let all_outputs = transaction.outputs.iter().map(|output| output.value).sum::<u64>();
+
+            let miner_fee = all_inputs - all_outputs;
+            miner_fee
+        });
+
+        Ok(())
     }
 
     pub fn add_block(&mut self, block: Block) -> Result<()> {
