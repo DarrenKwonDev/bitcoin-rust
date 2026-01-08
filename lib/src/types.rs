@@ -7,6 +7,7 @@ use crate::{
     crypto::{PublicKey, Signature},
     U256,
 };
+use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -122,22 +123,42 @@ impl Blockchain {
         // 이전 50개의 블록이 생성된 시간이 IDLE한 blocktime과 얼마나 차이가 났는지?
         let target_seconds = crate::IDEAL_BLOCK_TIME * crate::DIFFICULTY_UPDATE_INTERVAL;
 
+        // 실제 bitcoin에서는 leading zero 의 갯수를 늘려서 난이도를 증가 시킴.
+        // 여기서는 간이적으로 처리
         // target * (실제 시간 / 기대시간)
-        // 너무 빨리 되었다면 (실제 시간 / 기대시간) < 1 -> target이 더 어려워지게
+        // 너무 빨리 되었다면 (실제 시간 / 기대시간) < 1 -> target이 더 어려워지게 (target이 낮아질수록 조건을 만족하는 해시 만들기가 어려움)
         // 너무 느리게 되었다면 (실제 시간 / 기대 시간) > 1 -> target이 더 쉬워지게
-        let new_target = self.target * (time_diff_seconds as f64 / target_seconds as f64) as usize;
+        let new_target = BigDecimal::parse_bytes(&self.target.to_string().as_bytes(), 10)
+            .expect("BUG: impossible")
+            * (BigDecimal::from(time_diff_seconds) / BigDecimal::from(target_seconds));
+
+        // cut off decimal point and everything after
+        // it from string representation of new_target
+        let new_target_str = new_target
+            .to_string()
+            .split('.')
+            .next()
+            .expect("BUG: Expected a decimal point")
+            .to_owned();
+
+        let new_target: U256 = U256::from_str_radix(&new_target_str, 10).expect("BUG: impossible");
+
+        dbg!(new_target);
 
         // 현재 난이도의 25%, 400% 내에서만 움직이도록 clamp 처리한다. 너무 급격한 난이도 변경을 방지.
         let new_target = if new_target < self.target / 4 {
-            self.target / 4
+            dbg!(self.target / 4)
         } else if new_target > self.target * 4 {
-            self.target * 4
+            dbg!(self.target * 4)
         } else {
             new_target
         };
 
+        dbg!(new_target);
+
         // 최소보다는 커야 하므로
         self.target = new_target.min(crate::MIN_TARGET);
+        dbg!(self.target);
     }
 }
 
