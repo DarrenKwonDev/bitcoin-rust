@@ -114,6 +114,8 @@ impl Miner {
             thread::yield_now();
         })
     }
+    // 실제로는 주기적으로 template 유효성을 검증하는게 아니라
+    // 채굴 사실이 노드로부터 push된다. 
 
     async fn fetch_and_validate_template(&self) -> Result<()> {
         // mining 중 아니면 fetch해 와
