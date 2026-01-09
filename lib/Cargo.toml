@@ -1,5 +1,5 @@
 [package]
-name = "lib"
+name = "btclib"
 version = "0.1.0"
 edition = "2024"
 
@@ -24,3 +24,20 @@ thiserror = "1.0.61"
 tokio = { version = "1.38.0", features = ["full"] }
 uint = "0.9.5"
 uuid = { version = "1.8.0", features = ["v4", "serde"] }
+
+[[bin]]
+name = "block_print"
+path = "src/bin/block_print.rs"
+
+[[bin]]
+name = "block_gen"
+path = "src/bin/block_gen.rs"
+
+[[bin]]
+name = "tx_gen"
+path = "src/bin/tx_gen.rs"
+
+[[bin]]
+name = "tx_print"
+path = "src/bin/tx_print.rs"
+

@@ -69,6 +69,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "btclib"
+version = "0.1.0"
+dependencies = [
+ "bigdecimal",
+ "chrono",
+ "ciborium",
+ "ecdsa",
+ "flume",
+ "hex",
+ "k256",
+ "rand",
+ "serde",
+ "sha256",
+ "spki",
+ "thiserror",
+ "tokio",
+ "uint",
+ "uuid",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -421,27 +442,6 @@ dependencies = [
  "serdect",
  "sha2",
  "signature",
-]
-
-[[package]]
-name = "lib"
-version = "0.1.0"
-dependencies = [
- "bigdecimal",
- "chrono",
- "ciborium",
- "ecdsa",
- "flume",
- "hex",
- "k256",
- "rand",
- "serde",
- "sha256",
- "spki",
- "thiserror",
- "tokio",
- "uint",
- "uuid",
 ]
 
 [[package]]
