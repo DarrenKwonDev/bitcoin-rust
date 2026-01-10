@@ -8,7 +8,9 @@ use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::io::{Error as IoError, ErrorKind as IoErrorKind, Read, Result as IoResult, Write};
+use std::io::{
+    Error as IoError, ErrorKind as IoErrorKind, Read, Result as IoResult, Write,
+};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Blockchain {
@@ -51,6 +53,18 @@ impl Blockchain {
         self.blocks.len() as u64
     }
 
+    pub fn calculate_block_reward(&self) -> u64 {
+        let block_height = self.block_height();
+        let halvings = block_height / crate::HALVING_INTERVAL;
+
+        if halvings >= 64 {
+            // After 64 halvings, the reward becomes 0
+            0
+        } else {
+            (crate::INITIAL_REWARD * 10u64.pow(8)) >> halvings
+        }
+    }
+
     // 외부에서 전송 받은 tx를 mempool에 추가한다.
     pub fn add_to_mempool(&mut self, transaction: Transaction) -> Result<()> {
         let mut known_inputs = HashSet::new();
@@ -79,24 +93,30 @@ impl Blockchain {
         // 그 트랜잭션이 사용한 모든 utxo의 마킹을 해제
         for input in &transaction.inputs {
             // 이미 사용된 output이 utxo에 존재하는 경우, 이중 사용된 output임.
-            if let Some((true, _)) = self.utxos.get(&input.prev_transaction_output_hash) {
+            if let Some((true, _)) =
+                self.utxos.get(&input.prev_transaction_output_hash)
+            {
                 // 해당 utxo를 사용한, 먼저 mempool에 있던 tx를 찾아냄
-                let referencing_transaction =
-                    self.mempool.iter().enumerate().find(|(_, (_, transaction))| {
-                        transaction
-                            .outputs
-                            .iter()
-                            .any(|output| output.hash() == input.prev_transaction_output_hash)
+                let referencing_transaction = self
+                    .mempool
+                    .iter()
+                    .enumerate()
+                    .find(|(_, (_, transaction))| {
+                        transaction.outputs.iter().any(|output| {
+                            output.hash() == input.prev_transaction_output_hash
+                        })
                     });
 
                 // 지워야 할 기존 tx가 사용한 input들을 모두 사용 가능한 형태(mark=false) 로 되돌린다.
-                if let Some((idx, (_, referencing_transaction))) = referencing_transaction {
+                if let Some((idx, (_, referencing_transaction))) =
+                    referencing_transaction
+                {
                     for input in &referencing_transaction.inputs {
-                        self.utxos.entry(input.prev_transaction_output_hash).and_modify(
-                            |(marked, _)| {
+                        self.utxos
+                            .entry(input.prev_transaction_output_hash)
+                            .and_modify(|(marked, _)| {
                                 *marked = false;
-                            },
-                        );
+                            });
                     }
 
                     // remove the transaction from the mempool
@@ -104,11 +124,11 @@ impl Blockchain {
                 } else {
                     // 분명 이중 사용된 utxo이었을 텐데, 그걸 사용한 기존 tx를 mempool에서 발견하지 못했다?
                     // 이상한 케이스가 맞지만 해당 utxo의 mark를 false (아직 사용되지 않음) 으로 바꾼다
-                    self.utxos.entry(input.prev_transaction_output_hash).and_modify(
-                        |(marked, _)| {
+                    self.utxos
+                        .entry(input.prev_transaction_output_hash)
+                        .and_modify(|(marked, _)| {
                             *marked = false;
-                        },
-                    );
+                        });
                 }
             }
         }
@@ -128,7 +148,8 @@ impl Blockchain {
             .sum::<u64>();
 
         // 결과로 생성된 이번 블록의 output value를 더한다.
-        let all_outputs = transaction.outputs.iter().map(|output| output.value).sum::<u64>();
+        let all_outputs =
+            transaction.outputs.iter().map(|output| output.value).sum::<u64>();
 
         // 수수료를 생각하면 input이 항상 output보다 커야 한다
         if all_inputs < all_outputs {
@@ -153,7 +174,11 @@ impl Blockchain {
                 })
                 .sum::<u64>();
 
-            let all_outputs = transaction.outputs.iter().map(|output| output.value).sum::<u64>();
+            let all_outputs = transaction
+                .outputs
+                .iter()
+                .map(|output| output.value)
+                .sum::<u64>();
 
             let miner_fee = all_inputs - all_outputs;
             miner_fee
@@ -169,10 +194,15 @@ impl Blockchain {
         // 시간 지났으면 지워야 할 tx가 소비했던 input utxo들을 저장해뒀다가 mark=false로 바꾼다
         self.mempool.retain(|(timestamp, transaction)| {
             if now - *timestamp
-                > chrono::Duration::seconds(crate::MAX_MEMPOOL_TRANSACTION_AGE as i64)
+                > chrono::Duration::seconds(
+                    crate::MAX_MEMPOOL_TRANSACTION_AGE as i64,
+                )
             {
                 utxo_hashes_to_unmark.extend(
-                    transaction.inputs.iter().map(|input| input.prev_transaction_output_hash),
+                    transaction
+                        .inputs
+                        .iter()
+                        .map(|input| input.prev_transaction_output_hash),
                 );
                 false
             } else {
@@ -212,7 +242,8 @@ impl Blockchain {
             }
 
             // merkel root가 바르게 계산되었는지 체크한다 (tx 변조, 추가, 누락 여부 확인)
-            let calculated_merkle_root = MerkleRoot::calculate(&block.transactions);
+            let calculated_merkle_root =
+                MerkleRoot::calculate(&block.transactions);
             if calculated_merkle_root != block.header.merkle_root {
                 println!("invalid merkle root");
                 return Err(BtcError::InvalidMerkleRoot);
@@ -247,7 +278,8 @@ impl Blockchain {
                     self.utxos.remove(&input.prev_transaction_output_hash);
                 }
                 for output in transaction.outputs.iter() {
-                    self.utxos.insert(transaction.hash(), (false, output.clone()));
+                    self.utxos
+                        .insert(transaction.hash(), (false, output.clone()));
                 }
             }
         }
@@ -273,16 +305,19 @@ impl Blockchain {
         let time_diff_seconds = time_diff.num_seconds();
 
         // 이전 50개의 블록이 생성된 시간이 IDLE한 blocktime과 얼마나 차이가 났는지?
-        let target_seconds = crate::IDEAL_BLOCK_TIME * crate::DIFFICULTY_UPDATE_INTERVAL;
+        let target_seconds =
+            crate::IDEAL_BLOCK_TIME * crate::DIFFICULTY_UPDATE_INTERVAL;
 
         // 실제 bitcoin에서는 leading zero 의 갯수를 늘려서 난이도를 증가 시킴.
         // 여기서는 간이적으로 처리
         // target * (실제 시간 / 기대시간)
         // 너무 빨리 되었다면 (실제 시간 / 기대시간) < 1 -> target이 더 어려워지게 (target이 낮아질수록 조건을 만족하는 해시 만들기가 어려움)
         // 너무 느리게 되었다면 (실제 시간 / 기대 시간) > 1 -> target이 더 쉬워지게
-        let new_target = BigDecimal::parse_bytes(&self.target.to_string().as_bytes(), 10)
-            .expect("BUG: impossible")
-            * (BigDecimal::from(time_diff_seconds) / BigDecimal::from(target_seconds));
+        let new_target =
+            BigDecimal::parse_bytes(&self.target.to_string().as_bytes(), 10)
+                .expect("BUG: impossible")
+                * (BigDecimal::from(time_diff_seconds)
+                    / BigDecimal::from(target_seconds));
 
         // cut off decimal point and everything after
         // it from string representation of new_target
@@ -293,7 +328,8 @@ impl Blockchain {
             .expect("BUG: Expected a decimal point")
             .to_owned();
 
-        let new_target: U256 = U256::from_str_radix(&new_target_str, 10).expect("BUG: impossible");
+        let new_target: U256 =
+            U256::from_str_radix(&new_target_str, 10).expect("BUG: impossible");
 
         dbg!(new_target);
 
@@ -317,12 +353,19 @@ impl Blockchain {
 impl Savable for Blockchain {
     fn load<I: Read>(reader: I) -> IoResult<Self> {
         ciborium::de::from_reader(reader).map_err(|_| {
-            IoError::new(IoErrorKind::InvalidData, "Failed to deseriailize blockchain")
+            IoError::new(
+                IoErrorKind::InvalidData,
+                "Failed to deseriailize blockchain",
+            )
         })
     }
 
     fn save<O: Write>(&self, writer: O) -> IoResult<()> {
-        ciborium::ser::into_writer(self, writer)
-            .map_err(|_| IoError::new(IoErrorKind::InvalidData, "Failed to serialize blockchain"))
+        ciborium::ser::into_writer(self, writer).map_err(|_| {
+            IoError::new(
+                IoErrorKind::InvalidData,
+                "Failed to serialize blockchain",
+            )
+        })
     }
 }

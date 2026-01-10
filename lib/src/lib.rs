@@ -36,3 +36,6 @@ pub const DIFFICULTY_UPDATE_INTERVAL: u64 = 50;
 
 // 600 블록이 지나도 mempool에서 소비되지 않으면 tx를 버린다
 pub const MAX_MEMPOOL_TRANSACTION_AGE: u64 = 600;
+
+// 블록당 최대 20개의 블록만 허용
+pub const BLOCK_TRANSACTION_CAP: usize = 20;
